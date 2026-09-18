@@ -1,0 +1,19 @@
+# Generated data files
+*.bwdata
+*.bwdata.bin
+
+# Reconstructed images
+reconstructed_*.png
+test_reconstructed*.png
+test_image.png
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+venv/
+
+# IDE
+.vscode/
+.idea/
