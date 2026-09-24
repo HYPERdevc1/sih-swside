@@ -26,6 +26,12 @@ import sys
 import time
 
 try:
+    import zstandard as zstd
+    HAS_ZSTD = True
+except ImportError:
+    HAS_ZSTD = False
+
+try:
     from PIL import Image
 except ImportError:
     print("ERROR: Pillow is required.  Install it with:  pip install Pillow")
@@ -125,6 +131,55 @@ def save_compact_bwdata(data: dict, output_path: str):
     return bin_path, size_kb
 
 
+def delta_encode(pixel_bytes: bytes) -> bytes:
+    """
+    Delta-encode a byte sequence: store first pixel as-is, then
+    store the difference (mod 256) between consecutive pixels.
+    This clusters values near 0, making them much more compressible.
+    """
+    out = bytearray(len(pixel_bytes))
+    out[0] = pixel_bytes[0]
+    for i in range(1, len(pixel_bytes)):
+        out[i] = (pixel_bytes[i] - pixel_bytes[i - 1]) % 256
+    return bytes(out)
+
+
+def save_compressed_bwdata(data: dict, output_path: str):
+    """
+    Write a delta+zstd compressed version (.bwdata.zst) optimised for
+    low-bandwidth laser (OISL) transmission.
+
+    Format:
+        bytes 0-1 : width  (uint16, big-endian)
+        bytes 2-3 : height (uint16, big-endian)
+        bytes 4-N : zstd-compressed, delta-encoded pixel values
+
+    The byte array from bytes 4-N is what goes straight into the
+    Arduino/laser transmitter.
+    """
+    if not HAS_ZSTD:
+        return None, 0, 0
+
+    w = data["header"]["encoded_width"]
+    h = data["header"]["encoded_height"]
+    raw_pixels = bytes(p["v"] for p in data["pixels"])
+    delta_pixels = delta_encode(raw_pixels)
+
+    cctx = zstd.ZstdCompressor(level=19)
+    compressed = cctx.compress(delta_pixels)
+
+    zst_path = output_path + ".zst"
+    with open(zst_path, "wb") as f:
+        f.write(w.to_bytes(2, "big"))
+        f.write(h.to_bytes(2, "big"))
+        f.write(compressed)
+
+    raw_kb = len(raw_pixels) / 1024
+    zst_kb = os.path.getsize(zst_path) / 1024
+    ratio = len(raw_pixels) / len(compressed) if compressed else 0
+    return zst_path, zst_kb, ratio
+
+
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -183,8 +238,20 @@ def main():
     bin_path, bin_kb = save_compact_bwdata(data, output_path)
     print(f"  Binary file : {bin_path}  ({bin_kb:,.1f} KB)")
 
+    # save delta+zstd compressed (for laser OISL transmission)
+    if HAS_ZSTD:
+        zst_path, zst_kb, ratio = save_compressed_bwdata(data, output_path)
+        if zst_path:
+            tx_sec = (zst_kb * 1024 * 8) / 6000  # estimated TX time at 6 Kbps
+            print(f"  Compressed  : {zst_path}  ({zst_kb:,.1f} KB)")
+            print(f"  Compression : {ratio:.2f}x  (delta+zstd-19, lossless)")
+            print(f"  Est. TX @6Kb: {tx_sec:.0f}s ({tx_sec/60:.1f} min)")
+    else:
+        print("  [SKIP] zstandard not installed -- no compressed output")
+        print("         Install with:  pip install zstandard")
+
     print("=" * 60)
-    print("  [OK] Encoding complete -- ready for ESP transmission")
+    print("  [OK] Encoding complete -- ready for laser transmission")
     print("=" * 60)
 
     # optional preview

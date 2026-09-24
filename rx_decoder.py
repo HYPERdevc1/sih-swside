@@ -31,6 +31,12 @@ import io
 import base64
 
 try:
+    import zstandard as zstd
+    HAS_ZSTD = True
+except ImportError:
+    HAS_ZSTD = False
+
+try:
     from PIL import Image
 except ImportError:
     print("ERROR: Pillow is required.  Install it with:  pip install Pillow")
@@ -61,9 +67,56 @@ def decode_binary(file_path: str):
     return w, h, values, hdr
 
 
+def delta_decode(delta_bytes: bytes) -> list:
+    """
+    Reverse the delta encoding: first pixel is stored as-is,
+    subsequent values are cumulative sums (mod 256).
+    """
+    out = [0] * len(delta_bytes)
+    out[0] = delta_bytes[0]
+    for i in range(1, len(delta_bytes)):
+        out[i] = (out[i - 1] + delta_bytes[i]) % 256
+    return out
+
+
+def decode_compressed(file_path: str):
+    """
+    Decode a .bwdata.zst (delta+zstd compressed) file.
+    Returns (width, height, pixel_values, header_dict).
+    """
+    if not HAS_ZSTD:
+        print("ERROR: zstandard is required for .zst files.  "
+              "Install with:  pip install zstandard")
+        sys.exit(1)
+
+    with open(file_path, "rb") as f:
+        raw = f.read()
+    w = int.from_bytes(raw[0:2], "big")
+    h = int.from_bytes(raw[2:4], "big")
+
+    dctx = zstd.ZstdDecompressor()
+    delta_pixels = dctx.decompress(raw[4:])
+    values = delta_decode(delta_pixels)
+
+    hdr = {"encoded_width": w, "encoded_height": h, "total_pixels": w * h,
+           "source": os.path.basename(file_path), "compression": "delta+zstd"}
+    return w, h, values, hdr
+
+
 def decode_from_bytes(raw_bytes: bytes, filename: str):
     """Decode from raw bytes (used by the web upload handler)."""
-    if filename.endswith(".bin"):
+    if filename.endswith(".zst"):
+        if not HAS_ZSTD:
+            raise RuntimeError("zstandard not installed — cannot decode .zst")
+        w = int.from_bytes(raw_bytes[0:2], "big")
+        h = int.from_bytes(raw_bytes[2:4], "big")
+        dctx = zstd.ZstdDecompressor()
+        delta_pixels = dctx.decompress(raw_bytes[4:])
+        values = delta_decode(delta_pixels)
+        hdr = {"encoded_width": w, "encoded_height": h,
+               "total_pixels": w * h, "source": filename,
+               "compression": "delta+zstd"}
+    elif filename.endswith(".bin"):
         w = int.from_bytes(raw_bytes[0:2], "big")
         h = int.from_bytes(raw_bytes[2:4], "big")
         values = list(raw_bytes[4:])
@@ -112,7 +165,10 @@ def cli_reconstruct(file_path: str, output_path: str = None, show: bool = False)
     print("=" * 60)
     print(f"  Input file  : {file_path}")
 
-    if file_path.endswith(".bin"):
+    if file_path.endswith(".zst"):
+        w, h, values, hdr = decode_compressed(file_path)
+        print(f"  Compression : delta+zstd (lossless)")
+    elif file_path.endswith(".bin"):
         w, h, values, hdr = decode_binary(file_path)
     else:
         w, h, values, hdr = decode_json(file_path)
@@ -259,7 +315,7 @@ WEB_HTML = r"""
     <div class="dropzone" id="dropzone">
       <span class="icon">📂</span>
       <p>Drag & drop your <strong>.bwdata</strong> file here<br>or click to browse</p>
-      <input type="file" id="fileInput" accept=".bwdata,.bin">
+      <input type="file" id="fileInput" accept=".bwdata,.bin,.zst">
     </div>
     <div id="fileName" style="margin-top:.8rem;color:var(--accent2);font-family:'JetBrains Mono',monospace;font-size:.85rem"></div>
     <button type="submit" class="btn" id="submitBtn" disabled>

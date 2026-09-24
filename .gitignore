@@ -1,11 +1,13 @@
 # Generated data files
 *.bwdata
 *.bwdata.bin
+*.bwdata.zst
 
 # Reconstructed images
 reconstructed_*.png
 test_reconstructed*.png
 test_image.png
+tomsahur-modified.png
 
 # Python
 __pycache__/
@@ -13,6 +15,9 @@ __pycache__/
 *.pyo
 .env
 venv/
+
+# Research / exported artifacts
+research_lossless_packing.md
 
 # IDE
 .vscode/
