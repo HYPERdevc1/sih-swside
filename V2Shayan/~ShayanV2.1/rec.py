@@ -43,7 +43,12 @@ def receive_loop(port: str, baud: int, default_output: str = None, show: bool = 
         print(f"[-] Failed to open serial port {port}: {e}")
         sys.exit(1)
 
+    # Wait for ESP32 alignment test to finish (3s test + 200ms flush)
+    # This prevents the alignment test text from being misinterpreted as data
+    print("[*] Waiting for ESP32 startup alignment test to finish...")
+    time.sleep(4.0)
     ser.reset_input_buffer()
+
     print("[*] Waiting for laser transmission from ESP32 RX...")
     print("    (Align laser with sensor. Press Ctrl+C to stop.)\n")
 
@@ -59,7 +64,7 @@ def receive_loop(port: str, baud: int, default_output: str = None, show: bool = 
                 if time.time() - last_heartbeat > 5.0:
                     last_heartbeat = time.time()
                     if total_bytes_seen == 0:
-                        sys.stdout.write("\r[...] No bytes from ESP32 yet — check laser alignment & wiring")
+                        sys.stdout.write("\r[...] No bytes from ESP32 yet — check laser alignment & wiring   ")
                     else:
                         sys.stdout.write(f"\r[...] {total_bytes_seen:,} bytes received so far, searching for SIH1 header...")
                     sys.stdout.flush()
@@ -80,6 +85,13 @@ def receive_loop(port: str, baud: int, default_output: str = None, show: bool = 
             header_start = magic_idx
             format_flag = chr(stream_buffer[header_start + 4])
             file_len = struct.unpack(">I", stream_buffer[header_start + 5 : header_start + 9])[0]
+
+            # Sanity check: corrupted headers can have absurd file_len values
+            if file_len == 0 or file_len > 10_000_000:
+                print(f"\n[!] Ignoring corrupt header (file_len={file_len:,} bytes, flag='{format_flag}')")
+                # Remove this false header and keep searching
+                stream_buffer = bytearray(stream_buffer[magic_idx + 4:])
+                continue
 
             print(f"\n[+] Detected incoming file transmission!")
             print(f"    Format flag: '{format_flag}'")
