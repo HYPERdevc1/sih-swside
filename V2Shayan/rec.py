@@ -37,6 +37,7 @@ except ImportError:
 
 
 MAGIC_HEADER = b"SIH1"  # 4-byte header identifier
+STALL_TIMEOUT = 30.0     # seconds with no new data before giving up
 
 
 def delta_decode(data):
@@ -74,12 +75,19 @@ def receive_progressive(ser, file_data, file_len, start_time, default_output, sh
     def collect_until(target_len):
         """Read serial until file_data has at least target_len bytes."""
         last_print = 0
+        last_data_time = time.time()
         while len(file_data) < target_len:
             remaining = target_len - len(file_data)
             to_read = min(remaining, ser.in_waiting or 1)
             chunk = ser.read(to_read)
             if chunk:
                 file_data.extend(chunk)
+                last_data_time = time.time()
+            elif time.time() - last_data_time > STALL_TIMEOUT:
+                print(f"\n[!] TIMEOUT: No data received for {STALL_TIMEOUT}s.")
+                print(f"    Got {len(file_data)}/{target_len} bytes ({len(file_data)/target_len*100:.1f}%)")
+                print(f"    Possible cause: laser misalignment or too many dropped packets.")
+                return False
             now = time.time()
             if now - last_print > 0.1 or len(file_data) >= target_len:
                 last_print = now
@@ -93,9 +101,12 @@ def receive_progressive(ser, file_data, file_len, start_time, default_output, sh
                     f"{len(file_data):,}/{file_len:,} B | {rate:.1f} B/s"
                 )
                 sys.stdout.flush()
+        return True
 
     # ── Collect and parse the progressive sub-header ──
-    collect_until(SUB_HEADER_SIZE)
+    if not collect_until(SUB_HEADER_SIZE):
+        print("[!] Failed to receive progressive sub-header. Aborting.")
+        return
 
     tile_size = file_data[0]
     p1_w = int.from_bytes(file_data[1:3], 'big')
@@ -112,7 +123,9 @@ def receive_progressive(ser, file_data, file_len, start_time, default_output, sh
 
     # ── Phase 1: receive averages, reconstruct preview immediately ──
     p1_end = SUB_HEADER_SIZE + p1_len
-    collect_until(p1_end)
+    if not collect_until(p1_end):
+        print("[!] Phase 1 reception timed out. Aborting.")
+        return
 
     p1_time = time.time() - start_time
     print(f"\n[+] Phase 1 received in {p1_time:.1f}s -- reconstructing preview...")
@@ -138,7 +151,10 @@ def receive_progressive(ser, file_data, file_len, start_time, default_output, sh
     # ── Phase 2: receive residuals, reconstruct full lossless image ──
     print(f"\n[*] Receiving Phase 2 (full detail)...")
     p2_end = p1_end + p2_len
-    collect_until(p2_end)
+    if not collect_until(p2_end):
+        print("[!] Phase 2 reception timed out.")
+        print("    Preview image was saved. Full quality reconstruction skipped.")
+        return
 
     total_time = time.time() - start_time
     avg_speed = (len(file_data) * 8) / (total_time * 1000) if total_time > 0 else 0
@@ -246,6 +262,8 @@ def receive_loop(port: str, baud: int, default_output: str = None, show: bool = 
                 continue
 
             last_print = 0
+            last_data_time = time.time()
+            stalled = False
 
             # Collect the rest of the file
             while len(file_data) < file_len:
@@ -254,6 +272,13 @@ def receive_loop(port: str, baud: int, default_output: str = None, show: bool = 
                 chunk = ser.read(to_read)
                 if chunk:
                     file_data.extend(chunk)
+                    last_data_time = time.time()
+                elif time.time() - last_data_time > STALL_TIMEOUT:
+                    print(f"\n[!] TIMEOUT: No data received for {STALL_TIMEOUT}s.")
+                    print(f"    Got {len(file_data)}/{file_len} bytes ({len(file_data)/file_len*100:.1f}%)")
+                    print(f"    Possible cause: laser misalignment or too many dropped packets.")
+                    stalled = True
+                    break
 
                 # Progress display
                 now = time.time()
@@ -267,6 +292,10 @@ def receive_loop(port: str, baud: int, default_output: str = None, show: bool = 
                     bar = "=" * filled + "-" * (bar_len - filled)
                     sys.stdout.write(f"\r[{bar}] {pct:5.1f}% | {len(file_data):,}/{file_len:,} B | {rate:.1f} B/s")
                     sys.stdout.flush()
+
+            if stalled:
+                print("[*] Returning to listen mode...\n")
+                continue
 
             total_time = time.time() - start_time
             avg_speed = (len(file_data) * 8) / (total_time * 1000) if total_time > 0 else 0
